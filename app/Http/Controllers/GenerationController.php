@@ -260,35 +260,56 @@ class GenerationController extends Controller
      */
     private function verifyWebhookSignature(Request $request): bool
     {
-        $secret = config('services.pixelforge.webhook_secret');
-        if (!$secret) {
+        \Illuminate\Support\Facades\Log::warning('Pixelforge webhook signature mismatch', [
+            'headers' => $request->headers->all(),
+            'has_secret' => !empty(config('services.pixelforge.webhook_secret')),
+        ]);
+        
+        $secret = trim((string) config('services.pixelforge.webhook_secret'));
+        if ($secret === '') {
             return true;
         }
 
         $header = $request->header('X-Pixelforge-Signature')
-            ?? $request->header('X-Webhook-Signature');
+            ?? $request->header('X-Webhook-Signature')
+            ?? $request->header('X-Signature')
+            ?? $request->header('Webhook-Signature');
 
         if (!$header) {
+            \Illuminate\Support\Facades\Log::warning('Webhook missing signature header', [
+                'headers' => array_keys($request->headers->all()),
+            ]);
             return false;
         }
 
         $rawBody = $request->getContent();
+        $expectedRawHmac = hash_hmac('sha256', $rawBody, $secret);
 
-        // Support "t=timestamp,v1=sig" scheme if present
+        // Handle "t=<timestamp>,v1=<hex>" (Standard / Stripe-style webhook signature)
         if (str_contains($header, 'v1=')) {
             parse_str(str_replace(',', '&', $header), $parts);
-            $timestamp = $parts['t'] ?? '';
-            $sig = $parts['v1'] ?? '';
-            $signedPayload = $timestamp !== '' ? "{$timestamp}.{$rawBody}" : $rawBody;
-            $expected = hash_hmac('sha256', $signedPayload, $secret);
+            $timestamp = trim((string) ($parts['t'] ?? ''));
+            $sig = trim((string) ($parts['v1'] ?? ''));
 
-            return hash_equals($expected, $sig);
+            $expectedWithTs = $timestamp !== ''
+                ? hash_hmac('sha256', "{$timestamp}.{$rawBody}", $secret)
+                : $expectedRawHmac;
+
+            return hash_equals($expectedWithTs, $sig) || hash_equals($expectedRawHmac, $sig);
         }
 
-        // Support "sha256=<hex>" or raw "<hex>"
-        $sig = str_starts_with($header, 'sha256=') ? substr($header, 7) : $header;
-        $expected = hash_hmac('sha256', $rawBody, $secret);
+        // Handle "sha256=<hex>" or raw "<hex>"
+        $sig = trim(str_starts_with($header, 'sha256=') ? substr($header, 7) : $header);
 
-        return hash_equals($expected, $sig);
+        // Also check separate timestamp header if Pixelforge sends X-Pixelforge-Timestamp
+        $timestampHeader = $request->header('X-Pixelforge-Timestamp') ?? $request->header('X-Webhook-Timestamp');
+        if ($timestampHeader) {
+            $expectedWithTsHeader = hash_hmac('sha256', "{$timestampHeader}.{$rawBody}", $secret);
+            if (hash_equals($expectedWithTsHeader, $sig)) {
+                return true;
+            }
+        }
+
+        return hash_equals($expectedRawHmac, $sig);
     }
 }
