@@ -260,11 +260,11 @@ class GenerationController extends Controller
      */
     private function verifyWebhookSignature(Request $request): bool
     {
-        \Illuminate\Support\Facades\Log::warning('Pixelforge webhook signature mismatch', [
+        \Illuminate\Support\Facades\Log::warning('Manual Pixelforge webhook signature mismatch', [
             'headers' => $request->headers->all(),
             'has_secret' => !empty(config('services.pixelforge.webhook_secret')),
         ]);
-        
+
         $secret = trim((string) config('services.pixelforge.webhook_secret'));
         if ($secret === '') {
             return true;
