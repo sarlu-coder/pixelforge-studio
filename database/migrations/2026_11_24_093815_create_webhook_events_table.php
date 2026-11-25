@@ -16,6 +16,7 @@ return new class extends Migration
             $table->string('event_id')->unique(); // evt_...
             $table->string('event_type')->nullable();
             $table->string('pixelforge_id')->nullable()->index(); // gen_...
+            $table->timestamp('processed_at')->nullable();
             $table->timestamps();
         });
     }
