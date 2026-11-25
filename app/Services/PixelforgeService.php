@@ -12,8 +12,13 @@ class PixelforgeService
 
     private function client(): PendingRequest
     {
+        $apiKey = trim((string) config('services.pixelforge.api_key'));
+
+        if ($apiKey === '') {
+            throw new \RuntimeException('PIXELFORGE_API_KEY is not configured in .env.');
+        }
         return Http::baseUrl(config('services.pixelforge.base_url'))
-            ->withToken(config('services.pixelforge.api_key'))
+            ->withToken($apiKey)
             ->acceptJson()
             ->asJson()
             ->timeout(15);
