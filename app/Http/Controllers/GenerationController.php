@@ -161,14 +161,20 @@ class GenerationController extends Controller
         }
 
         $payload = $request->all();
-        $eventId = $payload['id'] ?? $request->header('X-Pixelforge-Event-Id');
-        $eventType = $payload['type'] ?? null;
+
+        $eventId = $request->header('Pixelforge-Event-Id')
+            ?? $request->header('X-Pixelforge-Event-Id')
+            ?? ($payload['id'] ?? null);
+
+        $eventType = $request->header('Pixelforge-Event-Type')
+            ?? $request->header('X-Pixelforge-Event-Type')
+            ?? ($payload['type'] ?? null);
+
         $genData = $payload['data']['object'] ?? $payload['data'] ?? $payload;
         $pixelforgeId = $genData['id'] ?? null;
 
         try {
             DB::transaction(function () use ($eventId, $eventType, $pixelforgeId, $genData) {
-                // 1. Record event ID once — duplicate deliveries hit UNIQUE constraint and abort cleanly
                 if ($eventId) {
                     if (WebhookEvent::where('event_id', $eventId)->exists()) {
                         return;
@@ -182,7 +188,6 @@ class GenerationController extends Controller
                     ]);
                 }
 
-                // 2. Lock generation row and apply monotonic state transition
                 if ($pixelforgeId) {
                     $generation = Generation::where('pixelforge_id', $pixelforgeId)
                         ->lockForUpdate()
@@ -194,7 +199,6 @@ class GenerationController extends Controller
                 }
             });
         } catch (UniqueConstraintViolationException) {
-            // Concurrent duplicate delivery of the same evt_ ID — safely ignore
             return response()->json(['received' => true, 'duplicate' => true]);
         }
 
@@ -260,56 +264,38 @@ class GenerationController extends Controller
      */
     private function verifyWebhookSignature(Request $request): bool
     {
-        \Illuminate\Support\Facades\Log::warning('Manual Pixelforge webhook signature mismatch', [
-            'headers' => $request->headers->all(),
-            'has_secret' => !empty(config('services.pixelforge.webhook_secret')),
-        ]);
-
         $secret = trim((string) config('services.pixelforge.webhook_secret'));
         if ($secret === '') {
             return true;
         }
 
-        $header = $request->header('X-Pixelforge-Signature')
-            ?? $request->header('X-Webhook-Signature')
-            ?? $request->header('X-Signature')
-            ?? $request->header('Webhook-Signature');
+        $header = $request->header('Pixelforge-Signature')
+            ?? $request->header('X-Pixelforge-Signature')
+            ?? $request->header('X-Webhook-Signature');
 
         if (!$header) {
-            \Illuminate\Support\Facades\Log::warning('Webhook missing signature header', [
-                'headers' => array_keys($request->headers->all()),
-            ]);
             return false;
         }
 
         $rawBody = $request->getContent();
-        $expectedRawHmac = hash_hmac('sha256', $rawBody, $secret);
 
-        // Handle "t=<timestamp>,v1=<hex>" (Standard / Stripe-style webhook signature)
         if (str_contains($header, 'v1=')) {
             parse_str(str_replace(',', '&', $header), $parts);
             $timestamp = trim((string) ($parts['t'] ?? ''));
             $sig = trim((string) ($parts['v1'] ?? ''));
 
-            $expectedWithTs = $timestamp !== ''
-                ? hash_hmac('sha256', "{$timestamp}.{$rawBody}", $secret)
-                : $expectedRawHmac;
-
-            return hash_equals($expectedWithTs, $sig) || hash_equals($expectedRawHmac, $sig);
-        }
-
-        // Handle "sha256=<hex>" or raw "<hex>"
-        $sig = trim(str_starts_with($header, 'sha256=') ? substr($header, 7) : $header);
-
-        // Also check separate timestamp header if Pixelforge sends X-Pixelforge-Timestamp
-        $timestampHeader = $request->header('X-Pixelforge-Timestamp') ?? $request->header('X-Webhook-Timestamp');
-        if ($timestampHeader) {
-            $expectedWithTsHeader = hash_hmac('sha256', "{$timestampHeader}.{$rawBody}", $secret);
-            if (hash_equals($expectedWithTsHeader, $sig)) {
-                return true;
+            if ($timestamp === '' || $sig === '') {
+                return false;
             }
+
+            $expected = hash_hmac('sha256', "{$timestamp}.{$rawBody}", $secret);
+
+            return hash_equals($expected, $sig);
         }
 
-        return hash_equals($expectedRawHmac, $sig);
+        $sig = trim(str_starts_with($header, 'sha256=') ? substr($header, 7) : $header);
+        $expected = hash_hmac('sha256', $rawBody, $secret);
+
+        return hash_equals($expected, $sig);
     }
 }
