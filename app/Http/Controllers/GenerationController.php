@@ -214,12 +214,10 @@ class GenerationController extends Controller
         $currentRank = self::STATUS_RANK[$generation->status] ?? 0;
         $incomingRank = self::STATUS_RANK[$incomingStatus] ?? 0;
 
-        // Ignore stale / out-of-order events (e.g. 'processing' arriving after 'succeeded' or 'failed')
         if ($incomingRank < $currentRank) {
             return;
         }
 
-        // If already terminal, never allow a different terminal state to overwrite it
         if ($generation->isTerminal() && $generation->status !== $incomingStatus) {
             return;
         }
@@ -229,21 +227,28 @@ class GenerationController extends Controller
             ?? $data['image_url']
             ?? $generation->image_url;
 
-        $rawProviderCost = $data['cost']
-            ?? $data['usage']['total_cost']
-            ?? null;
-
         $providerCost = $generation->provider_cost;
         $actualUserCost = $generation->actual_cost;
 
         if ($incomingStatus === 'failed') {
-            // Failed generations cost the user nothing
             $providerCost = '0.00000000';
             $actualUserCost = '0.00000000';
-        } elseif ($rawProviderCost !== null) {
-            // Apply 25% markup to Pixelforge's exact cost
-            $providerCost = (string) $rawProviderCost;
-            $actualUserCost = PixelforgeService::applyMarkupToDecimal($providerCost);
+        } elseif ($incomingStatus === 'succeeded') {
+            $calculatedProviderDecimal = $this->extractOrCalculateProviderCostDecimal($data);
+
+            if ($calculatedProviderDecimal !== null) {
+                $providerCost = $calculatedProviderDecimal;
+                $actualUserCost = PixelforgeService::applyMarkupToDecimal($providerCost);
+            }
+        }
+
+        $updatedAt = now();
+        if (!empty($data['updated_at']) && is_string($data['updated_at'])) {
+            try {
+                $updatedAt = Carbon::parse($data['updated_at']);
+            } catch (\Throwable) {
+                $updatedAt = now();
+            }
         }
 
         $generation->update([
@@ -252,11 +257,59 @@ class GenerationController extends Controller
             'provider_cost' => $providerCost,
             'actual_cost' => $actualUserCost,
             'error_message' => $data['error']['message'] ?? $generation->error_message,
-            'provider_updated_at' => isset($data['updated_at']) ? Carbon::parse($data['updated_at']) : now(),
+            'provider_updated_at' => $updatedAt,
             'completed_at' => in_array($incomingStatus, ['succeeded', 'failed'], true)
                 ? ($generation->completed_at ?? now())
                 : null,
         ]);
+    }
+
+    /**
+     * Extracts explicit provider cost or computes exact nanodollar cost from token counts:
+     * 1 token at $1.00 / 1M = $0.000000001 = 1 nanodollar.
+     */
+    private function extractOrCalculateProviderCostDecimal(array $data): ?string
+    {
+        $directCost = $data['cost']
+            ?? $data['cost_usd']
+            ?? $data['total_cost']
+            ?? data_get($data, 'usage.total_cost')
+            ?? data_get($data, 'usage.cost')
+            ?? null;
+
+        if ($directCost !== null && $directCost !== '') {
+            $units = PixelforgeService::parseToUnits((string) $directCost);
+            return PixelforgeService::formatUnits($units);
+        }
+
+        $usage = $data['usage'] ?? $data['tokens'] ?? [];
+
+        $inputTextTokens = (int) ($usage['input_text_tokens'] ?? $usage['prompt_tokens'] ?? $usage['input_tokens'] ?? 0);
+        $inputImageTokens = (int) ($usage['input_image_tokens'] ?? $usage['reference_image_tokens'] ?? 0);
+        $outputTokens = (int) ($usage['output_tokens'] ?? $usage['image_tokens'] ?? 0);
+        $reasoningTokens = (int) ($usage['reasoning_tokens'] ?? 0);
+
+        $hasAnyTokens = ($inputTextTokens + $inputImageTokens + $outputTokens + $reasoningTokens) > 0;
+        if (!$hasAnyTokens) {
+            return null;
+        }
+
+        // Rates per 1M tokens converted to nanodollars per token (rate_usd * 1000)
+        $nanoPerInputText = 5000;    // $5.00 / 1M
+        $nanoPerInputImage = 10000;  // $10.00 / 1M
+        $nanoPerOutput = 40000;      // $40.00 / 1M
+        $nanoPerReasoning = 12500;   // $12.50 / 1M
+
+        $totalNanodollars =
+            ($inputTextTokens * $nanoPerInputText)
+            + ($inputImageTokens * $nanoPerInputImage)
+            + ($outputTokens * $nanoPerOutput)
+            + ($reasoningTokens * $nanoPerReasoning);
+
+        // Convert nanodollars (10^-9 USD) to 10^-8 USD units (divide by 10)
+        $units = intdiv($totalNanodollars, 10);
+
+        return PixelforgeService::formatUnits($units);
     }
 
     /**

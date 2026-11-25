@@ -499,21 +499,21 @@ onUnmounted(() => {
                   </div>
 
                   <div class="flex items-center justify-between text-xs">
-                    <span class="text-zinc-500">Estimated</span>
+                    <span class="text-zinc-500">Estimated (incl. 25%)</span>
                     <span class="font-mono text-[11px] text-zinc-400">
                       ${{ gen.estimated_cost }}
                     </span>
                   </div>
 
                   <div class="flex items-center justify-between text-xs">
-                    <span class="text-zinc-400 font-medium">Actual</span>
+                    <span class="text-zinc-300 font-medium">Actual Cost</span>
                     <span
-                      v-if="gen.actual_cost !== null"
+                      v-if="gen.actual_cost !== null && gen.actual_cost !== undefined"
                       :class="[
-                        'rounded border px-2 py-0.5 font-mono text-[11px]',
+                        'rounded border px-2 py-0.5 font-mono text-[11px] font-semibold',
                         gen.status === 'failed'
                           ? 'border-zinc-800 bg-[#09090b] text-zinc-500'
-                          : 'border-[#26262b] bg-[#09090b] text-white',
+                          : 'border-emerald-500/30 bg-emerald-950/40 text-emerald-300',
                       ]"
                     >
                       ${{ gen.actual_cost }}
