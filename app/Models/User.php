@@ -22,6 +22,8 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'credit_balance',
+        'is_admin',
     ];
 
     /**
@@ -44,6 +46,18 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'credit_balance' => 'decimal:8',
+            'is_admin' => 'boolean',
         ];
+    }
+
+    public function generations(): HasMany
+    {
+        return $this->hasMany(Generation::class);
+    }
+
+    public function creditTransactions(): HasMany
+    {
+        return $this->hasMany(CreditTransaction::class);
     }
 }

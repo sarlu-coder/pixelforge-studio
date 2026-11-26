@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\CreditTransaction;
 use App\Models\Generation;
 use App\Models\WebhookEvent;
 use App\Services\PixelforgeService;
@@ -9,6 +10,7 @@ use Carbon\Carbon;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 
@@ -30,7 +32,6 @@ class GenerationController extends Controller
             ->take(50)
             ->get();
 
-        // Total settled user spend (failed jobs cost $0.00000000)
         $totalUnits = Generation::where('user_id', $user->id)
             ->where('status', '!=', 'failed')
             ->get(['actual_cost', 'estimated_cost'])
@@ -40,6 +41,9 @@ class GenerationController extends Controller
 
         return Inertia::render('Studio', [
             'generations' => $generations,
+            'creditBalance' => PixelforgeService::formatUnits(
+                PixelforgeService::parseToUnits((string) $user->credit_balance)
+            ),
             'totalSpend' => PixelforgeService::formatUnits($totalUnits),
             'pricingConfig' => [
                 'markupPercent' => PixelforgeService::MARKUP_PERCENT,
@@ -82,6 +86,17 @@ class GenerationController extends Controller
             $validated['quality'],
             $refUrls
         );
+        $estimatedUnits = PixelforgeService::parseToUnits($estimatedUserCost);
+
+        // Block generation if user cannot afford the estimated cost
+        $lockedUser = $request->user()->lockForUpdate()->find($request->user()->id);
+        $balanceUnits = PixelforgeService::parseToUnits((string) $lockedUser->credit_balance);
+
+        if ($balanceUnits < $estimatedUnits) {
+            return back()->withErrors([
+                'prompt' => 'Insufficient credit balance ($' . PixelforgeService::formatUnits($balanceUnits) . ' available vs $' . $estimatedUserCost . ' estimated). Click "Buy credits" to top up.',
+            ]);
+        }
 
         $idempotencyKey = (string) Str::uuid();
 
@@ -109,7 +124,6 @@ class GenerationController extends Controller
 
             $apiResponse = $pixelforge->createGeneration($payload, $idempotencyKey);
 
-            // Apply state safely in case webhook arrived before HTTP response returned!
             DB::transaction(function () use ($generation, $apiResponse) {
                 $locked = Generation::where('id', $generation->id)->lockForUpdate()->first();
                 $locked->pixelforge_id = $apiResponse['id'] ?? $locked->pixelforge_id;
@@ -136,7 +150,10 @@ class GenerationController extends Controller
     {
         abort_unless($generation->user_id === $request->user()->id, 403);
 
-        if ($generation->isTerminal() || !$generation->pixelforge_id) {
+        $alreadySettled = $generation->status === 'failed'
+            || ($generation->status === 'succeeded' && $generation->actual_cost !== null);
+
+        if ($alreadySettled || !$generation->pixelforge_id) {
             return response()->json($generation);
         }
 
@@ -150,10 +167,6 @@ class GenerationController extends Controller
         return response()->json($generation->fresh());
     }
 
-    /**
-     * Receives Pixelforge webhooks, verifies HMAC signature, deduplicates evt_ IDs,
-     * and handles out-of-order delivery safely.
-     */
     public function webhook(Request $request)
     {
         if (!$this->verifyWebhookSignature($request)) {
@@ -205,9 +218,6 @@ class GenerationController extends Controller
         return response()->json(['received' => true]);
     }
 
-    /**
-     * Monotonic state transition: prevents older delayed webhooks from overwriting newer states.
-     */
     private function applyProviderState(Generation $generation, array $data): void
     {
         $incomingStatus = $data['status'] ?? $generation->status;
@@ -262,12 +272,45 @@ class GenerationController extends Controller
                 ? ($generation->completed_at ?? now())
                 : null,
         ]);
+
+        // Settle credit balance once when generation succeeds with a finalized actual_cost
+        if ($incomingStatus === 'succeeded' && $actualUserCost !== null) {
+            $this->settleUserBalanceOnce($generation, $actualUserCost);
+        }
     }
 
-    /**
-     * Extracts explicit provider cost or computes exact nanodollar cost from token counts:
-     * 1 token at $1.00 / 1M = $0.000000001 = 1 nanodollar.
-     */
+    private function settleUserBalanceOnce(Generation $generation, string $actualUserCost): void
+    {
+        $alreadyCharged = CreditTransaction::where('generation_id', $generation->id)
+            ->where('type', 'generation_charge')
+            ->exists();
+
+        if ($alreadyCharged) {
+            return;
+        }
+
+        $chargeUnits = PixelforgeService::parseToUnits($actualUserCost);
+        $user = $generation->user()->lockForUpdate()->first();
+        if (!$user) {
+            return;
+        }
+
+        $currentBalanceUnits = PixelforgeService::parseToUnits((string) $user->credit_balance);
+        $newBalanceUnits = $currentBalanceUnits - $chargeUnits;
+        $newBalanceDecimal = PixelforgeService::formatUnits($newBalanceUnits);
+
+        $user->update(['credit_balance' => $newBalanceDecimal]);
+
+        CreditTransaction::create([
+            'user_id' => $user->id,
+            'generation_id' => $generation->id,
+            'type' => 'generation_charge',
+            'amount' => '-' . PixelforgeService::formatUnits($chargeUnits),
+            'balance_after' => $newBalanceDecimal,
+            'description' => 'Generation #' . $generation->id . ' (' . ($generation->pixelforge_id ?? 'sync') . ')',
+        ]);
+    }
+
     private function extractOrCalculateProviderCostDecimal(array $data): ?string
     {
         $directCost = $data['cost']
@@ -289,32 +332,20 @@ class GenerationController extends Controller
         $outputTokens = (int) ($usage['output_tokens'] ?? $usage['image_tokens'] ?? 0);
         $reasoningTokens = (int) ($usage['reasoning_tokens'] ?? 0);
 
-        $hasAnyTokens = ($inputTextTokens + $inputImageTokens + $outputTokens + $reasoningTokens) > 0;
-        if (!$hasAnyTokens) {
+        if (($inputTextTokens + $inputImageTokens + $outputTokens + $reasoningTokens) <= 0) {
             return null;
         }
 
-        // Rates per 1M tokens converted to nanodollars per token (rate_usd * 1000)
-        $nanoPerInputText = 5000;    // $5.00 / 1M
-        $nanoPerInputImage = 10000;  // $10.00 / 1M
-        $nanoPerOutput = 40000;      // $40.00 / 1M
-        $nanoPerReasoning = 12500;   // $12.50 / 1M
-
+        // 1 nanodollar = $0.000000001; rate per 1M tokens * 1000 = nanodollars per token
         $totalNanodollars =
-            ($inputTextTokens * $nanoPerInputText)
-            + ($inputImageTokens * $nanoPerInputImage)
-            + ($outputTokens * $nanoPerOutput)
-            + ($reasoningTokens * $nanoPerReasoning);
+            ($inputTextTokens * 5000)
+            + ($inputImageTokens * 10000)
+            + ($outputTokens * 40000)
+            + ($reasoningTokens * 12500);
 
-        // Convert nanodollars (10^-9 USD) to 10^-8 USD units (divide by 10)
-        $units = intdiv($totalNanodollars, 10);
-
-        return PixelforgeService::formatUnits($units);
+        return PixelforgeService::formatUnits(intdiv($totalNanodollars, 10));
     }
 
-    /**
-     * Verifies HMAC-SHA256 webhook signature against PIXELFORGE_WEBHOOK_SECRET.
-     */
     private function verifyWebhookSignature(Request $request): bool
     {
         $secret = trim((string) config('services.pixelforge.webhook_secret'));

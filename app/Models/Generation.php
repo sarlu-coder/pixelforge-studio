@@ -43,4 +43,9 @@ class Generation extends Model
     {
         return in_array($this->status, ['succeeded', 'failed'], true);
     }
+
+    public function creditTransactions(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(CreditTransaction::class);
+    }
 }

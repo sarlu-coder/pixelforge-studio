@@ -10,14 +10,17 @@ import {
   AlertCircle,
   ExternalLink,
   LogOut,
-  DollarSign,
+  Wallet,
   Image as ImageIcon,
   User,
+  BarChart3,
+  X,
 } from 'lucide-vue-next';
 
 const props = defineProps({
   auth: Object,
   generations: Array,
+  creditBalance: String,
   totalSpend: String,
   pricingConfig: Object,
 });
@@ -31,6 +34,25 @@ watch(
   },
   { deep: true }
 );
+
+const showBuyCreditsModal = ref(false);
+const topUpForm = useForm({
+  amount: '5.00',
+});
+
+const topUpPresets = ['1.00', '5.00', '10.00', '25.00'];
+
+const submitTopUp = (amountOverride = null) => {
+  if (amountOverride !== null) {
+    topUpForm.amount = amountOverride;
+  }
+  topUpForm.post(route('credits.topup'), {
+    preserveScroll: true,
+    onSuccess: () => {
+      showBuyCreditsModal.value = false;
+    },
+  });
+};
 
 const form = useForm({
   prompt: '',
@@ -61,7 +83,6 @@ const removeReferenceUrl = (index) => {
   form.reference_urls.splice(index, 1);
 };
 
-// Exact integer-scaled 8-decimal USD math matching PixelforgeService.php
 const toUnits = (str) => Math.round(parseFloat(str || '0') * 100_000_000);
 const fromUnits = (units) => (units / 100_000_000).toFixed(8);
 
@@ -82,17 +103,24 @@ const costBreakdown = computed(() => {
   const totalUserUnits = Math.floor((providerUnits * (100 + markupPct) + 50) / 100);
   const markupUnits = totalUserUnits - providerUnits;
 
+  const balanceUnits = toUnits(props.creditBalance);
+  const canAfford = balanceUnits >= totalUserUnits;
+
   return {
     providerSubtotal: fromUnits(providerUnits),
     markup: fromUnits(markupUnits),
     markupPct,
     total: fromUnits(totalUserUnits),
+    totalUnits: totalUserUnits,
+    canAfford,
     validRefCount: validRefs,
     estTokens,
   };
 });
 
 const submit = () => {
+  if (!costBreakdown.value.canAfford) return;
+
   form.post(route('generations.store'), {
     preserveScroll: true,
     onSuccess: () => {
@@ -101,7 +129,6 @@ const submit = () => {
   });
 };
 
-// Non-overlapping background polling for queued / processing generations
 let pollTimer = null;
 let isPolling = false;
 
@@ -133,13 +160,11 @@ const pollPendingGenerations = async () => {
         if (['succeeded', 'failed'].includes(updated.status)) {
           anyCompleted = true;
         }
-      } catch (_) {
-        // Ignore transient network errors during polling
-      }
+      } catch (_) {}
     }
 
     if (anyCompleted) {
-      router.reload({ only: ['totalSpend', 'generations'] });
+      router.reload({ only: ['totalSpend', 'creditBalance', 'generations'] });
     }
   } finally {
     isPolling = false;
@@ -158,8 +183,7 @@ onUnmounted(() => {
 <template>
   <Head title="Pixelforge Studio" />
 
-  <div class="min-h-screen bg-[#09090b] text-[#ededef] font-sans antialiased selection:bg-sky-500/30 selection:text-sky-200">
-    <!-- Top Navigation Bar -->
+  <div class="min-h-screen bg-[#09090b] text-[#ededef] font-sans antialiased">
     <header class="sticky top-0 z-30 border-b border-[#1f1f23] bg-[#09090b]/90 backdrop-blur">
       <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <div class="flex items-center gap-6">
@@ -174,38 +198,34 @@ onUnmounted(() => {
           </Link>
 
           <nav class="hidden md:flex items-center gap-5 text-sm text-zinc-400">
-            <Link :href="route('studio.index')" class="text-white font-medium">
-              Studio
-            </Link>
-            <Link :href="route('profile.edit')" class="hover:text-white transition">
-              Profile
-            </Link>
-            <a
-              href="https://pixelforge.promptedit.dev"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="hover:text-white transition"
+            <Link :href="route('studio.index')" class="text-white font-medium">Studio</Link>
+            <Link :href="route('profile.edit')" class="hover:text-white transition">Profile</Link>
+            <Link
+              v-if="auth.user?.is_admin"
+              :href="route('admin.report')"
+              class="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300 transition"
             >
-              API docs
-            </a>
+              <BarChart3 class="h-3.5 w-3.5" />
+              Admin Report
+            </Link>
           </nav>
         </div>
 
-        <div class="flex items-center gap-3 sm:gap-4">
-          <!-- Total User Spend Pill -->
+        <div class="flex items-center gap-2.5 sm:gap-3">
           <div class="flex items-center gap-1.5 rounded-md border border-[#242429] bg-[#111114] px-3 py-1.5 text-xs">
-            <DollarSign class="h-3.5 w-3.5 text-zinc-400" />
-            <span class="hidden sm:inline text-zinc-400">Total Spent:</span>
-            <span class="font-mono font-medium text-white">${{ totalSpend }}</span>
+            <Wallet class="h-3.5 w-3.5 text-emerald-400" />
+            <span class="hidden sm:inline text-zinc-400">Balance:</span>
+            <span class="font-mono font-semibold text-white">${{ creditBalance }}</span>
           </div>
 
-          <Link
-            :href="route('profile.edit')"
-            class="hidden sm:inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition"
+          <button
+            type="button"
+            @click="showBuyCreditsModal = true"
+            class="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-[#18181d] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#222229] transition"
           >
-            <User class="h-3.5 w-3.5" />
-            {{ auth.user.email }}
-          </Link>
+            <Plus class="h-3.5 w-3.5" />
+            Buy credits
+          </button>
 
           <Link
             :href="route('logout')"
@@ -220,46 +240,34 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- Main Content -->
     <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <div class="grid grid-cols-1 gap-8 lg:grid-cols-12">
-        <!-- Left Column: Prompt Composer & Pre-Submit Cost Estimator -->
         <div class="lg:col-span-5 space-y-6">
           <div>
             <h1 class="text-2xl font-bold tracking-tight text-white">Create a generation</h1>
             <p class="mt-1 text-sm text-zinc-400">
-              Configure your prompt, output dimensions, quality tier, and optional reference images.
+              Total spent so far: <span class="font-mono text-zinc-200">${{ totalSpend }}</span>
             </p>
           </div>
 
           <form @submit.prevent="submit" class="space-y-5 rounded-lg border border-[#222226] bg-[#111114] p-5 shadow-xl">
-            <!-- Prompt Input -->
             <div>
               <div class="flex items-center justify-between">
-                <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                  Prompt
-                </label>
-                <span class="font-mono text-[11px] text-zinc-500">
-                  ~{{ costBreakdown.estTokens }} tokens
-                </span>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">Prompt</label>
+                <span class="font-mono text-[11px] text-zinc-500">~{{ costBreakdown.estTokens }} tokens</span>
               </div>
               <textarea
                 v-model="form.prompt"
                 rows="4"
                 required
-                placeholder="Isometric brutalist concrete observatory at twilight, volumetric fog, 35mm lens..."
-                class="mt-2 w-full rounded-md border border-[#27272c] bg-[#09090b] p-3 text-sm text-white placeholder-zinc-600 focus:border-zinc-400 focus:outline-none focus:ring-0"
+                placeholder="Isometric brutalist concrete observatory at twilight..."
+                class="mt-2 w-full rounded-md border border-[#27272c] bg-[#09090b] p-3 text-sm text-white placeholder-zinc-600 focus:border-zinc-400 focus:outline-none"
               />
-              <p v-if="form.errors.prompt" class="mt-1.5 text-xs text-red-400">
-                {{ form.errors.prompt }}
-              </p>
+              <p v-if="form.errors.prompt" class="mt-1.5 text-xs text-red-400">{{ form.errors.prompt }}</p>
             </div>
 
-            <!-- Size Selector -->
             <div>
-              <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                Size
-              </label>
+              <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">Size</label>
               <div class="mt-2 grid grid-cols-3 gap-2">
                 <button
                   v-for="s in sizes"
@@ -279,11 +287,8 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Quality Selector -->
             <div>
-              <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                Quality
-              </label>
+              <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">Quality</label>
               <div class="mt-2 grid grid-cols-3 gap-2">
                 <button
                   v-for="q in qualities"
@@ -303,7 +308,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Optional Reference Image URLs -->
             <div>
               <div class="flex items-center justify-between">
                 <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
@@ -315,22 +319,16 @@ onUnmounted(() => {
                   @click="addReferenceUrl"
                   class="inline-flex items-center gap-1 text-xs font-medium text-zinc-300 hover:text-white"
                 >
-                  <Plus class="h-3.5 w-3.5" />
-                  Add URL
+                  <Plus class="h-3.5 w-3.5" /> Add URL
                 </button>
               </div>
-
               <div v-if="form.reference_urls.length > 0" class="mt-2 space-y-2">
-                <div
-                  v-for="(url, index) in form.reference_urls"
-                  :key="index"
-                  class="flex items-center gap-2"
-                >
+                <div v-for="(url, index) in form.reference_urls" :key="index" class="flex items-center gap-2">
                   <input
                     v-model="form.reference_urls[index]"
                     type="url"
                     placeholder="https://example.com/reference.png"
-                    class="w-full rounded-md border border-[#27272c] bg-[#09090b] px-3 py-2 font-mono text-xs text-white placeholder-zinc-600 focus:border-zinc-400 focus:outline-none focus:ring-0"
+                    class="w-full rounded-md border border-[#27272c] bg-[#09090b] px-3 py-2 font-mono text-xs text-white placeholder-zinc-600 focus:border-zinc-400 focus:outline-none"
                   />
                   <button
                     type="button"
@@ -341,95 +339,81 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <p v-else class="mt-1.5 text-xs text-zinc-500">
-                No reference images attached.
-              </p>
-              <p v-if="form.errors['reference_urls.0']" class="mt-1.5 text-xs text-red-400">
-                {{ form.errors['reference_urls.0'] }}
-              </p>
             </div>
 
-            <!-- Pre-Submit Cost Breakdown Box (Base + 25% Markup) -->
             <div class="rounded-md border border-[#26262b] bg-[#09090b] p-4 space-y-2">
               <div class="flex items-center justify-between text-xs text-zinc-400">
-                <span>
-                  Pixelforge base est. ({{ form.size }}, {{ form.quality }}, ~{{ costBreakdown.estTokens }} tok<template v-if="costBreakdown.validRefCount > 0">, {{ costBreakdown.validRefCount }} ref</template>)
-                </span>
+                <span>Pixelforge base est.</span>
                 <span class="font-mono text-zinc-300">${{ costBreakdown.providerSubtotal }}</span>
               </div>
               <div class="flex items-center justify-between text-xs text-zinc-400">
                 <span>Platform fee ({{ costBreakdown.markupPct }}% markup)</span>
                 <span class="font-mono text-zinc-300">+${{ costBreakdown.markup }}</span>
               </div>
-
               <div class="border-t border-[#1f1f24] pt-2.5 flex items-center justify-between">
-                <span class="text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                  Estimated Total (USD)
-                </span>
+                <span class="text-xs font-semibold uppercase tracking-wider text-zinc-300">Estimated Total</span>
                 <span class="rounded border border-[#2b2b31] bg-[#141418] px-2 py-0.5 font-mono text-sm font-semibold text-white">
                   ${{ costBreakdown.total }}
                 </span>
               </div>
-              <p class="text-[11px] text-zinc-500">
-                Final cost settles after render completes. Failed generations cost $0.00.
-              </p>
             </div>
 
-            <!-- Submit Button -->
+            <div
+              v-if="!costBreakdown.canAfford"
+              class="flex items-center justify-between rounded-md border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-200"
+            >
+              <span>Insufficient balance (${{ creditBalance }}).</span>
+              <button
+                type="button"
+                @click="showBuyCreditsModal = true"
+                class="font-semibold underline hover:text-white"
+              >
+                Buy credits
+              </button>
+            </div>
+
             <button
               type="submit"
-              :disabled="form.processing || !form.prompt.trim()"
+              :disabled="form.processing || !form.prompt.trim() || !costBreakdown.canAfford"
               class="flex w-full items-center justify-center gap-2 rounded-md bg-white px-4 py-2.5 text-sm font-semibold text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 transition"
             >
               <Loader2 v-if="form.processing" class="h-4 w-4 animate-spin" />
               <Sparkles v-else class="h-4 w-4" />
-              <span>{{ form.processing ? 'Queuing Generation...' : `Generate Image · $${costBreakdown.total}` }}</span>
+              <span>
+                {{
+                  !costBreakdown.canAfford
+                    ? 'Insufficient Credits'
+                    : form.processing
+                    ? 'Queuing Generation...'
+                    : `Generate Image · $${costBreakdown.total}`
+                }}
+              </span>
             </button>
           </form>
-
-          <!-- Info Callout matching Pixelforge Docs Banner -->
-          <div class="rounded-md border-l-2 border-sky-400 bg-[#081b24] p-4 text-xs leading-relaxed text-zinc-300">
-            <p class="font-semibold text-white">Asynchronous Generation</p>
-            <p class="mt-1 text-zinc-400">
-              Requests are queued on <code class="rounded bg-[#0d2733] px-1.5 py-0.5 font-mono text-sky-300">pixelforge.promptedit.dev/v1</code> and update automatically via webhook or background polling once settled.
-            </p>
-          </div>
         </div>
 
-        <!-- Right Column: User's Generation History & Cost Ledger -->
         <div class="lg:col-span-7 space-y-6">
           <div class="flex items-center justify-between">
             <div>
               <h2 class="text-xl font-bold tracking-tight text-white">Your Generations</h2>
-              <p class="mt-1 text-sm text-zinc-400">
-                Completed renders and exact per-request billing records.
-              </p>
+              <p class="mt-1 text-sm text-zinc-400">Live status, estimated cost, and settled actual cost.</p>
             </div>
             <span class="rounded border border-[#242429] bg-[#111114] px-2.5 py-1 font-mono text-xs text-zinc-400">
               {{ localGenerations.length }} items
             </span>
           </div>
 
-          <!-- Empty State -->
-          <div
-            v-if="localGenerations.length === 0"
-            class="flex flex-col items-center justify-center rounded-lg border border-dashed border-[#27272c] bg-[#111114]/50 py-20 text-center"
-          >
+          <div v-if="localGenerations.length === 0" class="flex flex-col items-center justify-center rounded-lg border border-dashed border-[#27272c] bg-[#111114]/50 py-20 text-center">
             <ImageIcon class="h-10 w-10 text-zinc-600" />
             <p class="mt-3 text-sm font-medium text-zinc-300">No generations yet</p>
-            <p class="mt-1 text-xs text-zinc-500">
-              Write a prompt on the left to queue your first Pixelforge render.
-            </p>
           </div>
 
-          <!-- Generation Cards Grid -->
           <div v-else class="grid grid-cols-1 gap-5 sm:grid-cols-2">
             <div
               v-for="gen in localGenerations"
               :key="gen.id"
               class="flex flex-col overflow-hidden rounded-lg border border-[#222226] bg-[#111114]"
             >
-              <!-- Image / Status Viewport -->
               <div class="relative aspect-square w-full bg-[#09090b] flex items-center justify-center overflow-hidden border-b border-[#1f1f24]">
                 <img
                   v-if="gen.status === 'succeeded' && gen.image_url"
@@ -437,30 +421,15 @@ onUnmounted(() => {
                   :alt="gen.prompt"
                   class="h-full w-full object-cover"
                 />
-
-                <div
-                  v-else-if="['queued', 'processing'].includes(gen.status)"
-                  class="flex flex-col items-center gap-2.5 p-6 text-center"
-                >
+                <div v-else-if="['queued', 'processing'].includes(gen.status)" class="flex flex-col items-center gap-2 p-6 text-center">
                   <Loader2 class="h-7 w-7 animate-spin text-sky-400" />
-                  <span class="font-mono text-xs uppercase tracking-wider text-zinc-300">
-                    {{ gen.status }}...
-                  </span>
-                  <span v-if="gen.pixelforge_id" class="font-mono text-[11px] text-zinc-500">
-                    {{ gen.pixelforge_id }}
-                  </span>
+                  <span class="font-mono text-xs uppercase text-zinc-300">{{ gen.status }}...</span>
                 </div>
-
-                <div
-                  v-else
-                  class="flex flex-col items-center gap-2 p-6 text-center text-red-400"
-                >
+                <div v-else class="flex flex-col items-center gap-2 p-6 text-center text-red-400">
                   <AlertCircle class="h-7 w-7" />
                   <span class="text-xs font-medium">Generation Failed</span>
-                  <span class="text-[11px] text-zinc-500 line-clamp-2">{{ gen.error_message }}</span>
                 </div>
 
-                <!-- Top-Right Status Badge -->
                 <div class="absolute top-2.5 right-2.5">
                   <span
                     :class="[
@@ -478,11 +447,8 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Card Metadata & Cost Footer (Both Estimated & Actual) -->
               <div class="flex flex-1 flex-col justify-between p-4 space-y-3">
-                <p class="text-xs leading-relaxed text-zinc-200 line-clamp-2" :title="gen.prompt">
-                  {{ gen.prompt }}
-                </p>
+                <p class="text-xs leading-relaxed text-zinc-200 line-clamp-2">{{ gen.prompt }}</p>
 
                 <div class="space-y-1.5 pt-2 border-t border-[#1e1e23]">
                   <div class="flex items-center justify-between text-[11px] text-zinc-400">
@@ -499,10 +465,8 @@ onUnmounted(() => {
                   </div>
 
                   <div class="flex items-center justify-between text-xs">
-                    <span class="text-zinc-500">Estimated (incl. 25%)</span>
-                    <span class="font-mono text-[11px] text-zinc-400">
-                      ${{ gen.estimated_cost }}
-                    </span>
+                    <span class="text-zinc-500">Estimated</span>
+                    <span class="font-mono text-[11px] text-zinc-400">${{ gen.estimated_cost }}</span>
                   </div>
 
                   <div class="flex items-center justify-between text-xs">
@@ -518,9 +482,7 @@ onUnmounted(() => {
                     >
                       ${{ gen.actual_cost }}
                     </span>
-                    <span v-else class="font-mono text-[11px] text-sky-400">
-                      Pending...
-                    </span>
+                    <span v-else class="font-mono text-[11px] text-sky-400">Pending...</span>
                   </div>
                 </div>
               </div>
@@ -529,5 +491,65 @@ onUnmounted(() => {
         </div>
       </div>
     </main>
+
+    <!-- Simulated "Buy Credits" Modal -->
+    <div
+      v-if="showBuyCreditsModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+    >
+      <div class="w-full max-w-md rounded-lg border border-[#27272c] bg-[#111114] p-6 space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-semibold text-white">Buy Credits</h3>
+            <p class="text-xs text-zinc-400">Simulated top-up for testing — no real payment charged.</p>
+          </div>
+          <button type="button" @click="showBuyCreditsModal = false" class="text-zinc-400 hover:text-white">
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+
+        <div class="grid grid-cols-4 gap-2">
+          <button
+            v-for="preset in topUpPresets"
+            :key="preset"
+            type="button"
+            @click="topUpForm.amount = preset"
+            :class="[
+              'rounded-md border py-2 font-mono text-xs font-semibold transition',
+              topUpForm.amount === preset
+                ? 'border-white bg-[#1f1f26] text-white'
+                : 'border-[#27272c] bg-[#09090b] text-zinc-400 hover:text-white',
+            ]"
+          >
+            +${{ preset }}
+          </button>
+        </div>
+
+        <form @submit.prevent="submitTopUp()" class="space-y-4">
+          <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-zinc-400">
+              Custom Amount (USD)
+            </label>
+            <input
+              v-model="topUpForm.amount"
+              type="number"
+              step="0.01"
+              min="0.10"
+              max="1000"
+              required
+              class="mt-1.5 w-full rounded-md border border-[#27272c] bg-[#09090b] px-3 py-2 font-mono text-sm text-white focus:border-zinc-400 focus:outline-none"
+            />
+          </div>
+
+          <button
+            type="submit"
+            :disabled="topUpForm.processing"
+            class="w-full rounded-md bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-zinc-200 disabled:opacity-50 transition"
+          >
+            {{ topUpForm.processing ? 'Adding Credits...' : `Add $${topUpForm.amount} Credits` }}
+          </button>
+        </form>
+      </div>
+    </div>
   </div>
 </template>

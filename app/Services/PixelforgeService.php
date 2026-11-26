@@ -118,4 +118,12 @@ class PixelforgeService
 
         return $response->json();
     }
+
+    public function getUsage(array $query = []): array
+    {
+        $response = $this->client()->get('/usage', $query);
+        $response->throw();
+
+        return $response->json();
+    }
 }
