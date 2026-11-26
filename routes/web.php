@@ -27,7 +27,6 @@ Route::middleware('auth')->group(function () {
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('/', [GenerationController::class, 'index'])->name('studio.index');
-    Route::get('/studio', [GenerationController::class, 'index'])->name('studio.index');
     Route::post('/generations', [GenerationController::class, 'store'])->name('generations.store');
     Route::get('/generations/{generation}/sync', [GenerationController::class, 'sync'])->name('generations.sync');
 
